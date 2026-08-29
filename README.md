@@ -63,3 +63,8 @@ src/pdfsearchviewer/
 ## 许可证说明
 
 本工具依赖 PyMuPDF（AGPL）。仅适合个人或单位内部使用；若需对外分发闭源软件，请更换引擎或取得 Artifex 商用许可。
+
+## TODO
+
+* 限定坐标
+* 页码偏置
