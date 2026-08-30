@@ -111,9 +111,10 @@ def index_pdf(path: str | Path, progress=None) -> DocumentIndex:
                                 )
                             )
 
-            # page separator as newline so page-local searches still work on full stream
+            # Page separator: two newlines so collapse_single_newlines keeps a barrier
             if page_no < len(doc) - 1 and raw_parts:
-                raw_parts.append("\n")
+                raw_parts.append("\n\n")
+                stream_map.append(-1)
                 stream_map.append(-1)
 
         return DocumentIndex(

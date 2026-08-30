@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 
 from .models import NormalizeOptions
 
@@ -24,7 +23,7 @@ def is_whitespace_char(ch: str) -> bool:
 def apply_char_rules(ch: str, options: NormalizeOptions) -> str | None:
     """
     Transform a single character under normalize options.
-    Returns None if the character should be dropped (e.g. whitespace when「忽略空白」).
+    Returns None if the character should be dropped (e.g. whitespace when stripping).
     """
     if options.strip_whitespace and is_whitespace_char(ch):
         return None
@@ -36,11 +35,6 @@ def apply_char_rules(ch: str, options: NormalizeOptions) -> str | None:
     return out
 
 
-def trim_pattern_whitespace(pattern: str) -> str:
-    """Remove whitespace from the search string when「忽略空白」is on."""
-    return "".join(ch for ch in pattern if not is_whitespace_char(ch))
-
-
 def build_normalized_stream(
     raw_text: str,
     stream_map: list[int],
@@ -50,55 +44,31 @@ def build_normalized_stream(
     Build a searchable string from raw_text under options.
     Returns (normalized_text, map_from_norm_index_to_stream_index).
     stream_map entries of -1 (inserted newlines) are treated as whitespace.
-
-    strip_whitespace (忽略空白): drop all whitespace on the page-text side
-    (the search pattern is stripped the same way via trim_pattern_whitespace).
-
-    collapse_single_newlines: drop a lone ``\\n`` (soft line wrap) so patterns can
-    span one line break; keep a single ``\\n`` for runs of two or more (blank line /
-    paragraph / page barrier) so ``.`` and ``$`` still stop there.
     """
     if not options.any_enabled():
         return raw_text, list(range(len(raw_text)))
 
     norm_chars: list[str] = []
     norm_to_stream: list[int] = []
-    i = 0
-    n = len(raw_text)
 
-    while i < n:
-        ch = raw_text[i]
-
-        if options.collapse_single_newlines and ch == "\n" and not options.strip_whitespace:
-            j = i + 1
-            while j < n and raw_text[j] == "\n":
-                j += 1
-            if j - i >= 2:
-                norm_chars.append("\n")
-                norm_to_stream.append(i)
-            i = j
-            continue
-
+    for i, ch in enumerate(raw_text):
+        # Inserted line breaks count as whitespace for strip purposes
         if stream_map[i] < 0:
             if options.strip_whitespace:
-                i += 1
                 continue
             norm_chars.append(ch)
             norm_to_stream.append(i)
-            i += 1
             continue
 
         transformed = apply_char_rules(ch, options)
         if transformed is None:
-            i += 1
             continue
+        # unify_dashes may collapse multi-dash in future; per-char for now
         if options.unify_dashes and len(transformed) == 1 and transformed == "-":
             if norm_chars and norm_chars[-1] == "-":
-                i += 1
                 continue
         norm_chars.append(transformed)
         norm_to_stream.append(i)
-        i += 1
 
     return "".join(norm_chars), norm_to_stream
 
@@ -107,16 +77,15 @@ def normalize_display_text(text: str, options: NormalizeOptions) -> str:
     """Normalize a plain string for display / grouping (no stream map)."""
     if not options.any_enabled():
         return text
-    stream_map = list(range(len(text)))
-    out, _ = build_normalized_stream(text, stream_map, options)
-    return out
-
-
-def effective_normalize(options: NormalizeOptions, *, dotall: bool) -> NormalizeOptions:
-    """Merge legacy ``dotall`` into normalize options (collapse soft newlines)."""
-    if dotall and not options.collapse_single_newlines:
-        return replace(options, collapse_single_newlines=True)
-    return options
+    parts: list[str] = []
+    for ch in text:
+        t = apply_char_rules(ch, options)
+        if t is None:
+            continue
+        if options.unify_dashes and t == "-" and parts and parts[-1] == "-":
+            continue
+        parts.append(t)
+    return "".join(parts)
 
 
 def color_to_hex(color: int) -> str:

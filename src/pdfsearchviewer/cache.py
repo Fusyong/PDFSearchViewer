@@ -296,10 +296,12 @@ def _query_to_json(query: SearchQuery) -> str:
             "is_regex": query.is_regex,
             "case_insensitive": query.case_insensitive,
             "dotall": query.dotall,
+            "whole_word": query.whole_word,
             "normalize": {
                 "strip_whitespace": query.normalize.strip_whitespace,
                 "unify_digits": query.normalize.unify_digits,
                 "unify_dashes": query.normalize.unify_dashes,
+                "collapse_single_newlines": query.normalize.collapse_single_newlines,
             },
             "style": {
                 "fonts": query.style.fonts,
@@ -327,10 +329,13 @@ def _query_from_json(s: str) -> SearchQuery:
         is_regex=d.get("is_regex", True),
         case_insensitive=d.get("case_insensitive", False),
         dotall=d.get("dotall", False),
+        whole_word=d.get("whole_word", False),
         normalize=NormalizeOptions(
             strip_whitespace=n.get("strip_whitespace", False),
             unify_digits=n.get("unify_digits", False),
             unify_dashes=n.get("unify_dashes", False),
+            collapse_single_newlines=n.get("collapse_single_newlines", False)
+            or d.get("dotall", False),
         ),
         style=StyleFilter(
             fonts=st.get("fonts", []),

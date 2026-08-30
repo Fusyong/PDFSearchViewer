@@ -14,7 +14,7 @@ from pdfsearchviewer.models import (
     StyleMatchMode,
 )
 from pdfsearchviewer.normalize import build_normalized_stream, normalize_display_text
-from pdfsearchviewer.search_engine import search
+from pdfsearchviewer.search_engine import filter_hits, search
 from pdfsearchviewer.stats import group_hits, summary_counts
 
 
@@ -109,13 +109,15 @@ def test_strip_whitespace_optional(doc_index):
     assert pattern in norms or any(pattern in n for n in norms)
 
 def test_style_size_filter(doc_index):
-    q = SearchQuery(
-        pattern=".",
-        is_regex=True,
-        style=StyleFilter(size_min=13.5, size_max=14.5, match_mode=StyleMatchMode.MAJORITY),
+    q = SearchQuery(pattern=".", is_regex=True)
+    all_hits = search(doc_index, q)
+    style = StyleFilter(
+        size_min=13.5, size_max=14.5, match_mode=StyleMatchMode.MAJORITY
     )
-    hits = search(doc_index, q)
+    hits = filter_hits(all_hits, style)
+    assert hits
     assert all(13.5 <= h.size <= 14.5 for h in hits)
+    assert len(hits) < len(all_hits)
 
 
 def test_normalize_display():
@@ -166,3 +168,20 @@ def test_dotall_multiline(doc_index):
     q = SearchQuery(pattern=r"Fig.*sample|图.*示", is_regex=True, dotall=True)
     hits = search(doc_index, q)
     assert isinstance(hits, list)
+
+def test_ignore_whitespace_also_strips_pattern(doc_index):
+    """忽略空白 applies to the search string as well as page text."""
+    if "图" in doc_index.raw_text:
+        pattern = "图 1 - 2"  # spaces in query
+        needle = "图1-2"
+    else:
+        pattern = "Fig 1 - 2"
+        needle = "Fig1-2"
+    q = SearchQuery(
+        pattern=pattern,
+        is_regex=False,
+        normalize=NormalizeOptions(strip_whitespace=True),
+    )
+    hits = search(doc_index, q)
+    assert len(hits) >= 2
+    assert any(needle in (h.normalized_text or h.text) for h in hits)

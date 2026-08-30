@@ -5,7 +5,19 @@ from pathlib import Path
 import pymupdf
 from PySide6.QtGui import QImage, QPainter, QColor, QPen
 
-from .models import BBox, CameraSettings, Hit
+from .models import AlignMode, BBox, CameraSettings, Hit, ViewMode
+
+
+def _view_size_pts(
+    page_rect: pymupdf.Rect,
+    camera: CameraSettings,
+) -> tuple[float, float]:
+    # BOOK uses the same clip geometry as FIT_WIDTH (full page width strip)
+    if camera.view_mode in (ViewMode.BOOK, ViewMode.FIT_WIDTH):
+        return page_rect.width, camera.tile_h / camera.zoom
+    if camera.view_mode == ViewMode.FIT_HEIGHT:
+        return camera.tile_w / camera.zoom, page_rect.height
+    return camera.tile_w / camera.zoom, camera.tile_h / camera.zoom
 
 
 def _clip_rect(
@@ -13,30 +25,68 @@ def _clip_rect(
     page_rect: pymupdf.Rect,
     camera: CameraSettings,
 ) -> pymupdf.Rect:
-    x0, y0, x1, y1 = hit_bbox
-    cx = (x0 + x1) / 2 + camera.pan_x
-    cy = (y0 + y1) / 2 + camera.pan_y
-    # Desired view size in PDF points from tile pixels / zoom
-    view_w = camera.tile_w / camera.zoom
-    view_h = camera.tile_h / camera.zoom
-    # Also expand by margin around hit
-    half_w = max(view_w / 2, (x1 - x0) / 2 + camera.margin)
-    half_h = max(view_h / 2, (y1 - y0) / 2 + camera.margin)
-    # Prefer fixed tile aspect: use view_w/view_h as primary
-    half_w = view_w / 2
-    half_h = view_h / 2
-    clip = pymupdf.Rect(cx - half_w, cy - half_h, cx + half_w, cy + half_h)
-    # Clamp to page
+    hx0, hy0, hx1, hy1 = hit_bbox
+    cx = (hx0 + hx1) / 2 + camera.pan_x
+    cy = (hy0 + hy1) / 2 + camera.pan_y
+    vw, vh = _view_size_pts(page_rect, camera)
+    mode = camera.view_mode
+    align = camera.align
+
+    if mode in (ViewMode.BOOK, ViewMode.FIT_WIDTH):
+        clip_x0 = page_rect.x0
+        if align == AlignMode.TOP:
+            clip_y0 = hy0 + camera.pan_y
+        else:
+            # LEFT / CENTER: vertically center on hit
+            clip_y0 = cy - vh / 2
+    elif mode == ViewMode.FIT_HEIGHT:
+        clip_y0 = page_rect.y0
+        if align == AlignMode.LEFT:
+            clip_x0 = hx0 + camera.pan_x
+        else:
+            # TOP / CENTER: horizontally center on hit
+            clip_x0 = cx - vw / 2
+    else:
+        # LOCAL
+        if align == AlignMode.LEFT:
+            clip_x0 = hx0 + camera.pan_x
+            clip_y0 = cy - vh / 2
+        elif align == AlignMode.TOP:
+            clip_x0 = cx - vw / 2
+            clip_y0 = hy0 + camera.pan_y
+        else:
+            clip_x0 = cx - vw / 2
+            clip_y0 = cy - vh / 2
+
+    clip = pymupdf.Rect(clip_x0, clip_y0, clip_x0 + vw, clip_y0 + vh)
     clip = clip & page_rect
     if clip.is_empty or clip.width < 1 or clip.height < 1:
-        # fallback: hit bbox + margin
         clip = pymupdf.Rect(
-            max(page_rect.x0, x0 - camera.margin),
-            max(page_rect.y0, y0 - camera.margin),
-            min(page_rect.x1, x1 + camera.margin),
-            min(page_rect.y1, y1 + camera.margin),
+            max(page_rect.x0, hx0 - camera.margin),
+            max(page_rect.y0, hy0 - camera.margin),
+            min(page_rect.x1, hx1 + camera.margin),
+            min(page_rect.y1, hy1 + camera.margin),
         )
     return clip
+
+
+def _pad_offsets(
+    img_w: int,
+    img_h: int,
+    tile_w: int,
+    tile_h: int,
+    align: AlignMode,
+) -> tuple[int, int]:
+    if align == AlignMode.LEFT:
+        x = 0
+        y = max(0, (tile_h - img_h) // 2)
+    elif align == AlignMode.TOP:
+        x = max(0, (tile_w - img_w) // 2)
+        y = 0
+    else:
+        x = max(0, (tile_w - img_w) // 2)
+        y = max(0, (tile_h - img_h) // 2)
+    return x, y
 
 
 def render_hit_image(
@@ -54,7 +104,6 @@ def render_hit_image(
     img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
 
     if highlight and not clip.is_empty:
-        # Map hit bbox to image coords
         scale = camera.zoom
         hx0 = (hit.bbox[0] - clip.x0) * scale
         hy0 = (hit.bbox[1] - clip.y0) * scale
@@ -72,13 +121,13 @@ def render_hit_image(
         painter.drawRect(int(hx0), int(hy0), max(1, int(hx1 - hx0)), max(1, int(hy1 - hy0)))
         painter.end()
 
-    # Scale/pad to exact tile size
     if img.width() != camera.tile_w or img.height() != camera.tile_h:
         out = QImage(camera.tile_w, camera.tile_h, QImage.Format.Format_RGB888)
         out.fill(QColor(240, 240, 240))
         painter = QPainter(out)
-        x = (camera.tile_w - img.width()) // 2
-        y = (camera.tile_h - img.height()) // 2
+        x, y = _pad_offsets(
+            img.width(), img.height(), camera.tile_w, camera.tile_h, camera.align
+        )
         painter.drawImage(x, y, img)
         painter.end()
         return out
@@ -97,3 +146,22 @@ class PdfRenderSession:
 
     def render(self, hit: Hit, camera: CameraSettings, highlight: bool = True) -> QImage:
         return render_hit_image(self.doc, hit, camera, highlight=highlight)
+
+    def render_page(
+        self,
+        page_no: int,
+        zoom: float,
+        clip: pymupdf.Rect | None = None,
+    ) -> QImage:
+        page = self.doc[page_no]
+        mat = pymupdf.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+        fmt = QImage.Format.Format_RGB888
+        return QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+
+    def page_rect(self, page_no: int) -> pymupdf.Rect:
+        return self.doc[page_no].rect
+
+    @property
+    def page_count(self) -> int:
+        return self.doc.page_count

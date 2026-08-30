@@ -10,10 +10,15 @@ from .models import (
     Hit,
     SearchQuery,
     StyleFilter,
-    StyleMatchMode,
     strip_font_subset,
 )
-from .normalize import build_normalized_stream, normalize_display_text
+from .normalize import (
+    build_normalized_stream,
+    effective_normalize,
+    trim_pattern_whitespace,
+    normalize_display_text,
+)
+from .regex_locale import expand_locale_escapes
 
 
 def _bbox_union(chars: list[CharInfo]) -> BBox:
@@ -25,45 +30,50 @@ def _bbox_union(chars: list[CharInfo]) -> BBox:
     )
 
 
-def _char_in_region(ch: CharInfo, region: BBox) -> bool:
-    cx = (ch.bbox[0] + ch.bbox[2]) / 2
-    cy = (ch.bbox[1] + ch.bbox[3]) / 2
-    return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
-
-
-def _style_match_char(ch: CharInfo, style: StyleFilter) -> bool:
+def hit_passes_presentation_filters(
+    hit: Hit,
+    style: StyleFilter,
+    page_from: int | None = None,
+    page_to: int | None = None,
+) -> bool:
+    """Style / region / page range — presentation only (not used during search)."""
+    if page_from is not None and hit.page < page_from:
+        return False
+    if page_to is not None and hit.page > page_to:
+        return False
+    if style.is_empty():
+        return True
     if style.fonts:
-        name = strip_font_subset(ch.font).lower()
+        name = strip_font_subset(hit.font).lower()
         if not any(f.lower() in name or name in f.lower() for f in style.fonts):
             return False
-    if style.size_min is not None and ch.size + style.size_tolerance < style.size_min:
+    if style.size_min is not None and hit.size + style.size_tolerance < style.size_min:
         return False
-    if style.size_max is not None and ch.size - style.size_tolerance > style.size_max:
+    if style.size_max is not None and hit.size - style.size_tolerance > style.size_max:
         return False
-    if style.colors and ch.color not in style.colors:
+    if style.colors and hit.color not in style.colors:
         return False
-    if style.region is not None and not _char_in_region(ch, style.region):
-        return False
+    if style.region is not None:
+        cx = (hit.bbox[0] + hit.bbox[2]) / 2
+        cy = (hit.bbox[1] + hit.bbox[3]) / 2
+        r = style.region
+        if not (r[0] <= cx <= r[2] and r[1] <= cy <= r[3]):
+            return False
     return True
 
 
-def _hit_passes_style(chars: list[CharInfo], style: StyleFilter) -> bool:
-    if style.is_empty() or not chars:
-        return True
-    flags = [_style_match_char(c, style) for c in chars]
-    mode = style.match_mode
-    if mode == StyleMatchMode.ALL:
-        return all(flags)
-    if mode == StyleMatchMode.ANY:
-        return any(flags)
-    if mode == StyleMatchMode.FIRST_SPAN:
-        # first non-whitespace char
-        for c in chars:
-            if not c.text.isspace():
-                return _style_match_char(c, style)
-        return _style_match_char(chars[0], style)
-    # majority
-    return sum(flags) * 2 >= len(flags)
+def filter_hits(
+    hits: list[Hit],
+    style: StyleFilter | None = None,
+    page_from: int | None = None,
+    page_to: int | None = None,
+) -> list[Hit]:
+    style = style or StyleFilter()
+    return [
+        h
+        for h in hits
+        if hit_passes_presentation_filters(h, style, page_from, page_to)
+    ]
 
 
 def _dominant_style(chars: list[CharInfo]) -> tuple[str, float, int]:
@@ -77,27 +87,57 @@ def _dominant_style(chars: list[CharInfo]) -> tuple[str, float, int]:
     return font, float(size), color
 
 
+def _pattern_for_search(pattern: str, options) -> str:
+    """Apply the same whitespace ignoring to the query as to page text."""
+    if not options.strip_whitespace:
+        return pattern
+    return trim_pattern_whitespace(pattern)
+
+
+def _apply_whole_word(pattern: str) -> str:
+    """Require ASCII word boundaries on both sides.
+
+    Latin/ids: a substring inside a longer token will not match.
+    CJK is not treated as a word-char here, so Chinese terms still match
+    inside continuous Han text.
+    """
+    return rf"(?<![A-Za-z0-9_])(?:{pattern})(?![A-Za-z0-9_])"
+
+
 def search(index: DocumentIndex, query: SearchQuery) -> list[Hit]:
+    """Text search only. Style / region / page filters are applied at presentation time."""
     if not query.pattern:
         return []
 
+    opts = effective_normalize(query.normalize, dotall=query.dotall)
     search_text, norm_to_stream = build_normalized_stream(
-        index.raw_text, index.stream_map, query.normalize
+        index.raw_text, index.stream_map, opts
     )
 
     flags = 0
     if query.case_insensitive:
         flags |= re.IGNORECASE
-    if query.dotall:
-        flags |= re.DOTALL
+    # Soft line-breaks are removed in the search stream; do not use re.DOTALL
+    # so '.' / '.*' still stop at blank lines (kept as a single newline).
+
+    pattern = _pattern_for_search(query.pattern, opts)
+    if not pattern:
+        return []
 
     if query.is_regex:
         try:
-            cre = re.compile(query.pattern, flags)
-        except re.error as e:
+            body = expand_locale_escapes(pattern)
+        except ValueError as e:
             raise ValueError(f"无效正则表达式: {e}") from e
     else:
-        cre = re.compile(re.escape(query.pattern), flags)
+        body = re.escape(pattern)
+    if query.whole_word:
+        body = _apply_whole_word(body)
+
+    try:
+        cre = re.compile(body, flags)
+    except re.error as e:
+        raise ValueError(f"无效正则表达式: {e}") from e
 
     hits: list[Hit] = []
     hit_id = 0
@@ -121,19 +161,10 @@ def search(index: DocumentIndex, query: SearchQuery) -> list[Hit]:
         if not hit_chars:
             continue
 
-        # page filter
         page = hit_chars[0].page
-        if query.page_from is not None and page < query.page_from:
-            continue
-        if query.page_to is not None and page > query.page_to:
-            continue
-
         # multi-page hit: keep if majority on one page; use first page chars only for bbox
         page_chars = [c for c in hit_chars if c.page == page]
         if not page_chars:
-            continue
-
-        if not _hit_passes_style(page_chars, query.style):
             continue
 
         original = "".join(c.text for c in page_chars)
@@ -141,7 +172,7 @@ def search(index: DocumentIndex, query: SearchQuery) -> list[Hit]:
         if not original:
             original = m.group(0)
 
-        normalized = normalize_display_text(original, query.normalize)
+        normalized = normalize_display_text(original, opts)
         font, size, color = _dominant_style(page_chars)
 
         hits.append(

@@ -89,9 +89,16 @@ class NormalizeOptions:
     strip_whitespace: bool = False
     unify_digits: bool = False  # reserved
     unify_dashes: bool = False  # reserved
+    # Drop lone \n (soft wrap); keep a barrier for \n\n+ (blank line / page)
+    collapse_single_newlines: bool = False
 
     def any_enabled(self) -> bool:
-        return self.strip_whitespace or self.unify_digits or self.unify_dashes
+        return (
+            self.strip_whitespace
+            or self.unify_digits
+            or self.unify_dashes
+            or self.collapse_single_newlines
+        )
 
 
 @dataclass
@@ -99,7 +106,9 @@ class SearchQuery:
     pattern: str
     is_regex: bool = True
     case_insensitive: bool = False
-    dotall: bool = False  # '.' matches newline
+    # Legacy name: means collapse soft newlines (not re.DOTALL)
+    dotall: bool = False
+    whole_word: bool = False  # require Unicode word boundaries around the match
     normalize: NormalizeOptions = field(default_factory=NormalizeOptions)
     style: StyleFilter = field(default_factory=StyleFilter)
     page_from: Optional[int] = None  # 0-based inclusive
@@ -138,6 +147,36 @@ class DocumentIndex:
     stream_map: list[int]
 
 
+class ViewMode(str, Enum):
+    """Hit-tile viewport preset."""
+
+    BOOK = "book"  # facing pages: even left, odd right; default
+    FIT_WIDTH = "fit_width"  # full page width (horizontal books)
+    FIT_HEIGHT = "fit_height"  # full page height (vertical books)
+    LOCAL = "local"  # fixed window centered on hit (legacy)
+
+
+class AlignMode(str, Enum):
+    LEFT = "left"  # default for book / fit_width
+    TOP = "top"  # default for fit_height
+    CENTER = "center"  # default for local
+
+
+class LayoutMode(str, Enum):
+    """How hit tiles are arranged in the grid."""
+
+    ROW = "row"  # left-to-right, then next row (横排)
+    COLUMN = "column"  # top-to-bottom, then next column (竖排)
+
+
+def default_align_for_view(mode: ViewMode) -> AlignMode:
+    if mode in (ViewMode.BOOK, ViewMode.FIT_WIDTH):
+        return AlignMode.LEFT
+    if mode == ViewMode.FIT_HEIGHT:
+        return AlignMode.TOP
+    return AlignMode.CENTER
+
+
 @dataclass
 class CameraSettings:
     zoom: float = 2.0
@@ -146,4 +185,7 @@ class CameraSettings:
     pan_y: float = 0.0
     tile_w: int = 220
     tile_h: int = 120
-    columns: int = 4
+    columns: int = 4  # lane count: columns when ROW, rows when COLUMN (ignored in BOOK)
+    view_mode: ViewMode = ViewMode.BOOK
+    align: AlignMode = AlignMode.LEFT
+    layout: LayoutMode = LayoutMode.ROW
