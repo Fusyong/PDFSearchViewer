@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,6 +11,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -24,6 +27,10 @@ from ..page_numbers import to_display_page, to_pdf_page
 class SearchPanel(QWidget):
     search_requested = Signal(object)  # SearchQuery — text search only
     filters_changed = Signal()  # presentation filters (style / region / page)
+    batch_open_requested = Signal()
+    batch_rerun_requested = Signal()
+    batch_filter_changed = Signal()
+    batch_closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -146,6 +153,36 @@ class SearchPanel(QWidget):
         self.search_btn = QPushButton("搜索")
         self.search_btn.clicked.connect(self._emit_search)
         self.pattern.returnPressed.connect(self._emit_search)
+        self.batch_btn = QPushButton("批处理…")
+        self.batch_btn.setToolTip(
+            "选择文本文件，用当前搜索选项逐行搜索，合并为一次搜索结果。"
+            "完成后可按条目勾选显示。空行跳过。"
+        )
+        self.batch_btn.clicked.connect(self.batch_open_requested.emit)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.search_btn)
+        btn_row.addWidget(self.batch_btn)
+
+        self.batch_box = QGroupBox("条目筛选")
+        self.batch_box.setVisible(False)
+        batch_layout = QVBoxLayout(self.batch_box)
+        self.batch_file_label = QLabel()
+        self.batch_file_label.setWordWrap(True)
+        self.batch_rerun = QPushButton("重新运行")
+        self.batch_rerun.setToolTip("搜索选项改过之后，用当前选项重新处理每一行。")
+        self.batch_close = QPushButton("关闭")
+        self.batch_close.setToolTip("关掉条目筛选，仍保留这次搜索的全部命中。")
+        self.batch_rerun.clicked.connect(self.batch_rerun_requested.emit)
+        self.batch_close.clicked.connect(self._close_batch)
+        nav = QHBoxLayout()
+        nav.addWidget(self.batch_rerun)
+        nav.addWidget(self.batch_close)
+        self.batch_list = QListWidget()
+        self.batch_list.setMaximumHeight(160)
+        self.batch_list.itemChanged.connect(self._on_batch_item_changed)
+        batch_layout.addWidget(self.batch_file_label)
+        batch_layout.addLayout(nav)
+        batch_layout.addWidget(self.batch_list)
 
         layout.addWidget(QLabel("搜索"))
         layout.addWidget(self.pattern)
@@ -153,7 +190,8 @@ class SearchPanel(QWidget):
         layout.addWidget(style_box)
         layout.addWidget(region_box)
         layout.addWidget(page_box)
-        layout.addWidget(self.search_btn)
+        layout.addLayout(btn_row)
+        layout.addWidget(self.batch_box)
         layout.addStretch(1)
 
         self.page_offset.valueChanged.connect(self._on_offset_sync_page_to)
@@ -354,3 +392,84 @@ class SearchPanel(QWidget):
 
     def _emit_search(self) -> None:
         self.search_requested.emit(self.build_search_query())
+
+    def checked_batch_indices(self) -> set[int]:
+        """Entry rows whose checkbox is on. Row index matches the batch result list."""
+        checked: set[int] = set()
+        for i in range(self.batch_list.count()):
+            item = self.batch_list.item(i)
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                checked.add(i)
+        return checked
+
+    def set_batch(
+        self,
+        *,
+        title: str,
+        file_label: str,
+        file_tip: str,
+        rows: list[tuple[str, str, str]],
+        checked: list[bool] | None = None,
+    ) -> None:
+        """Show the entry filter. ``rows`` are (label, tooltip, state).
+
+        ``state`` is ``hits``, ``empty``, or ``error``.
+        Boxes start checked unless ``checked`` says otherwise.
+        """
+        self.batch_box.setVisible(True)
+        self.batch_box.setTitle(title)
+        self.batch_file_label.setText(file_label)
+        self.batch_file_label.setToolTip(file_tip)
+        self.batch_list.blockSignals(True)
+        self.batch_list.clear()
+        for i, (label, tip, state) in enumerate(rows):
+            item = QListWidgetItem(label)
+            item.setToolTip(tip)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            on = True if checked is None or i >= len(checked) else checked[i]
+            item.setCheckState(
+                Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+            )
+            self._paint_batch_item(item, state)
+            self.batch_list.addItem(item)
+        self.batch_list.blockSignals(False)
+
+    def update_batch_rows(
+        self, title: str, rows: list[tuple[str, str, str]]
+    ) -> None:
+        """Refresh labels after presentation filters change. Keeps checkboxes."""
+        self.batch_box.setTitle(title)
+        if self.batch_list.count() != len(rows):
+            return
+        self.batch_list.blockSignals(True)
+        for i, (label, tip, state) in enumerate(rows):
+            item = self.batch_list.item(i)
+            if item is None:
+                continue
+            item.setText(label)
+            item.setToolTip(tip)
+            self._paint_batch_item(item, state)
+        self.batch_list.blockSignals(False)
+
+    def _paint_batch_item(self, item: QListWidgetItem, state: str) -> None:
+        if state == "error":
+            item.setForeground(QColor("#a12626"))
+        elif state == "empty":
+            item.setForeground(QColor("#666666"))
+        else:
+            item.setForeground(self.palette().color(QPalette.ColorRole.Text))
+
+    def _on_batch_item_changed(self, _item: QListWidgetItem) -> None:
+        self.batch_filter_changed.emit()
+
+    def hide_batch(self) -> None:
+        """Hide the entry list without telling the window (search is being replaced)."""
+        self.batch_list.blockSignals(True)
+        self.batch_list.clear()
+        self.batch_list.blockSignals(False)
+        self.batch_box.setVisible(False)
+        self.batch_file_label.clear()
+
+    def _close_batch(self) -> None:
+        self.hide_batch()
+        self.batch_closed.emit()

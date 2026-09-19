@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .batch import BatchSession, batch_session_from_json
 from .models import (
     CharInfo,
     DocumentIndex,
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS searches (
     pattern TEXT NOT NULL,
     query_json TEXT NOT NULL,
     created_at REAL NOT NULL,
+    batch_json TEXT,
     FOREIGN KEY (fingerprint) REFERENCES documents(fingerprint)
 );
 
@@ -72,7 +74,13 @@ class IndexCache:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(searches)")}
+        if cols and "batch_json" not in cols:
+            self._conn.execute("ALTER TABLE searches ADD COLUMN batch_json TEXT")
 
     def close(self) -> None:
         self._conn.close()
@@ -110,16 +118,19 @@ class IndexCache:
         query: SearchQuery,
         hits: list[Hit],
         name: str | None = None,
+        batch_json: str | None = None,
     ) -> int:
         import time
 
         qj = _query_to_json(query)
         cur = self._conn.execute(
             """
-            INSERT INTO searches (fingerprint, name, pattern, query_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO searches (
+                fingerprint, name, pattern, query_json, created_at, batch_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (fingerprint, name, query.pattern, qj, time.time()),
+            (fingerprint, name, query.pattern, qj, time.time(), batch_json),
         )
         search_id = int(cur.lastrowid)
         for h in hits:
@@ -183,6 +194,18 @@ class IndexCache:
                 )
             )
         return hits
+
+    def load_batch(self, search_id: int) -> BatchSession | None:
+        row = self._conn.execute(
+            "SELECT batch_json FROM searches WHERE id = ?",
+            (search_id,),
+        ).fetchone()
+        if not row or not row["batch_json"]:
+            return None
+        try:
+            return batch_session_from_json(row["batch_json"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
 
     def update_hit_review(self, search_id: int, hit_id: int, reviewed: bool | None) -> None:
         val = None if reviewed is None else (1 if reviewed else 0)

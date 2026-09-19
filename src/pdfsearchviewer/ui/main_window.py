@@ -13,8 +13,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -24,9 +26,21 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QListWidget,
 )
 
+from ..batch import (
+    BatchLineResult,
+    BatchSession,
+    PatternFileError,
+    apply_batch_session,
+    batch_session_to_json,
+    capture_batch_session,
+    flatten_batch_hits,
+    format_batch_label,
+    load_pattern_lines,
+    run_batch,
+    summarize_batch,
+)
 from ..cache import IndexCache
 from ..indexer import file_fingerprint, index_pdf
 from ..models import (
@@ -62,6 +76,11 @@ class MainWindow(QMainWindow):
         self.render_session: PdfRenderSession | None = None
         self.current_search_id: int | None = None
         self._hit_by_id: dict[int, Hit] = {}
+        self._batch_results: list[BatchLineResult] = []
+        self._batch_lines: list[tuple[int, str]] = []
+        self._batch_path: Path | None = None
+        self._hit_entry: dict[int, int] = {}
+        self._in_batch_run = False
 
         self._build_ui()
         self._build_menu()
@@ -84,6 +103,10 @@ class MainWindow(QMainWindow):
         self.search_panel.search_requested.connect(self.run_search)
         self.search_panel.filters_changed.connect(self._refresh_presentation)
         self.search_panel.page_offset.valueChanged.connect(self._on_page_offset_changed)
+        self.search_panel.batch_open_requested.connect(self.open_batch)
+        self.search_panel.batch_rerun_requested.connect(self._rerun_batch)
+        self.search_panel.batch_filter_changed.connect(self._refresh_presentation)
+        self.search_panel.batch_closed.connect(self._on_batch_closed)
         left_l.addWidget(self.search_panel)
         left_l.addWidget(QLabel("已保存会话"))
         self.session_list = QListWidget()
@@ -213,6 +236,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         open_act = QAction("打开 PDF", self)
         open_act.triggered.connect(self.open_pdf)
+        batch_act = QAction("批处理搜索…", self)
+        batch_act.triggered.connect(self.open_batch)
         export_csv = QAction("导出 CSV", self)
         export_csv.triggered.connect(self.export_csv)
         export_json = QAction("导出 JSON", self)
@@ -226,6 +251,7 @@ class MainWindow(QMainWindow):
 
         menu = self.menuBar().addMenu("文件")
         menu.addAction(open_act)
+        menu.addAction(batch_act)
         menu.addAction(save_sess)
         menu.addAction(export_csv)
         menu.addAction(export_json)
@@ -287,6 +313,7 @@ class MainWindow(QMainWindow):
             self.hits = []
             self.current_search_id = None
             self._hit_by_id = {}
+            self.search_panel._close_batch()
             offset = self.search_panel.page_offset_value()
             self.hit_grid.set_page_offset(offset)
             self.hit_grid.set_hits([])
@@ -311,28 +338,49 @@ class MainWindow(QMainWindow):
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.hits = search(self.index, query)
-            self._hit_by_id = {h.hit_id: h for h in self.hits}
-            offset = self.search_panel.page_offset_value()
-            self.hit_grid.set_page_offset(offset)
-            self.hit_grid.set_camera(self.camera)
-            self.page_view.set_page_offset(offset)
-            self._refresh_presentation()
-            self.center_tabs.setCurrentWidget(self.hits_tab)
+            hits = search(self.index, query)
+            self.current_search_id = None
+            self._drop_batch_filter()
+            self.search_panel.hide_batch()
+            self._install_hits(hits)
         except ValueError as e:
             QMessageBox.warning(self, "搜索错误", str(e))
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _install_hits(self, hits: list[Hit], *, status: str | None = None) -> None:
+        self.hits = hits
+        self._hit_by_id = {h.hit_id: h for h in self.hits}
+        offset = self.search_panel.page_offset_value()
+        self.hit_grid.set_page_offset(offset)
+        self.hit_grid.set_camera(self.camera)
+        self.page_view.set_page_offset(offset)
+        self._refresh_presentation(status=status)
+        self.center_tabs.setCurrentWidget(self.hits_tab)
+
     def _presentation_hits(self) -> list[Hit]:
         style, page_from, page_to = self.search_panel.presentation_filters()
-        return filter_hits(self.hits, style, page_from, page_to)
+        hits = filter_hits(self.hits, style, page_from, page_to)
+        return self._apply_entry_filter(hits)
 
-    def _refresh_presentation(self) -> None:
+    def _apply_entry_filter(self, hits: list[Hit]) -> list[Hit]:
+        if not self._batch_results:
+            return hits
+        checked = self.search_panel.checked_batch_indices()
+        return [h for h in hits if self._hit_entry.get(h.hit_id) in checked]
+
+    def _refresh_presentation(self, status: str | None = None) -> None:
+        if self._in_batch_run:
+            return
         shown = self._presentation_hits()
         self.hit_grid.set_hits(shown)
         self.stats_panel.set_hits(shown)
         self.page_view.set_hits(shown)
+        if self._batch_results:
+            self._sync_batch_labels()
+        if status is not None:
+            self.statusBar().showMessage(status)
+            return
         total = len(self.hits)
         n = len(shown)
         if total and n != total:
@@ -342,13 +390,170 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("无命中")
 
+    def open_batch(self) -> None:
+        if self._in_batch_run:
+            return
+        if not self.index:
+            QMessageBox.information(self, "提示", "请先打开 PDF")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "批处理文本",
+            "",
+            "文本 (*.txt);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            lines = load_pattern_lines(path)
+        except PatternFileError as e:
+            QMessageBox.warning(self, "批处理", str(e))
+            return
+        if not lines:
+            QMessageBox.information(self, "批处理", "文件中没有可搜索的行（空行已跳过）")
+            return
+        self._batch_path = Path(path)
+        self._batch_lines = lines
+        self._execute_batch()
+
+    def _rerun_batch(self) -> None:
+        if not self._batch_lines:
+            return
+        self._execute_batch()
+
+    def _execute_batch(self) -> None:
+        if self._in_batch_run or not self.index or not self._batch_lines:
+            return
+        template = self.search_panel.build_search_query()
+        progress = QProgressDialog("正在批处理…", "取消", 0, len(self._batch_lines), self)
+        progress.setWindowTitle("批处理")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        cancelled = False
+
+        def on_progress(index: int, total: int, pattern: str) -> bool:
+            nonlocal cancelled
+            line_no = self._batch_lines[index][0]
+            shown = pattern if len(pattern) <= 40 else pattern[:39] + "…"
+            progress.setLabelText(f"{index + 1}/{total}  第 {line_no} 行：{shown}")
+            progress.setValue(index)
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                cancelled = True
+                return False
+            return True
+
+        self._in_batch_run = True
+        try:
+            results = run_batch(
+                self.index,
+                template,
+                self._batch_lines,
+                on_progress=on_progress,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "批处理失败", str(e))
+            return
+        finally:
+            self._in_batch_run = False
+            progress.close()
+
+        if cancelled or len(results) != len(self._batch_lines):
+            self.statusBar().showMessage("已取消批处理")
+            return
+        self.current_search_id = None
+        self._batch_results = results
+        combined, self._hit_entry = flatten_batch_hits(results)
+        title, rows = self._batch_view()
+        name = self._batch_path.name if self._batch_path else "批处理"
+        tip = str(self._batch_path) if self._batch_path else ""
+        self.search_panel.set_batch(
+            title=title,
+            file_label=name,
+            file_tip=tip,
+            rows=rows,
+        )
+        self._install_hits(combined)
+
+    def _drop_batch_filter(self) -> None:
+        self._batch_results = []
+        self._batch_lines = []
+        self._batch_path = None
+        self._hit_entry = {}
+
+    def _on_batch_closed(self) -> None:
+        self._drop_batch_filter()
+        if not self._in_batch_run:
+            self._refresh_presentation()
+
+    def _batch_filtered_count(self, entry: BatchLineResult) -> int | None:
+        if entry.error:
+            return None
+        style, page_from, page_to = self.search_panel.presentation_filters()
+        return len(filter_hits(entry.hits, style, page_from, page_to))
+
+    def _batch_view(self) -> tuple[str, list[tuple[str, str, str]]]:
+        counts: list[int | None] = []
+        rows: list[tuple[str, str, str]] = []
+        for entry in self._batch_results:
+            count = self._batch_filtered_count(entry)
+            counts.append(count)
+            if entry.error:
+                state = "error"
+                tip = f"{entry.pattern}\n{entry.error}"
+            elif count == 0:
+                state = "empty"
+                tip = entry.pattern
+            else:
+                state = "hits"
+                tip = entry.pattern
+            rows.append(
+                (
+                    format_batch_label(
+                        entry.line_no,
+                        entry.pattern,
+                        count=count,
+                        error=entry.error,
+                    ),
+                    tip,
+                    state,
+                )
+            )
+        return summarize_batch(self._batch_results, counts), rows
+
+    def _sync_batch_labels(self) -> None:
+        if not self._batch_results:
+            return
+        title, rows = self._batch_view()
+        self.search_panel.update_batch_rows(title, rows)
+
     def save_session(self) -> None:
         if not self.index or not self.hits:
             QMessageBox.information(self, "提示", "没有可保存的搜索结果")
             return
         query = self.search_panel.build_query()
-        name = query.pattern[:40]
-        sid = self.cache.save_search(self.index.fingerprint, query, self.hits, name=name)
+        if self._batch_path:
+            name = self._batch_path.stem
+        else:
+            name = query.pattern[:40] or "搜索"
+        batch_json = None
+        if self._batch_results:
+            snapshot = capture_batch_session(
+                self._batch_results,
+                self.hits,
+                self._hit_entry,
+                self.search_panel.checked_batch_indices(),
+                str(self._batch_path) if self._batch_path else None,
+            )
+            batch_json = batch_session_to_json(snapshot)
+        sid = self.cache.save_search(
+            self.index.fingerprint,
+            query,
+            self.hits,
+            name=name,
+            batch_json=batch_json,
+        )
         self.current_search_id = sid
         self._refresh_sessions()
         self.statusBar().showMessage(f"已保存会话 #{sid}")
@@ -358,9 +563,8 @@ class MainWindow(QMainWindow):
         if not self.index:
             return
         for s in self.cache.list_searches(self.index.fingerprint):
-            self.session_list.addItem(
-                f"#{s['id']} {s['pattern'][:30]} ({s['hit_count']})"
-            )
+            label = (s["name"] or s["pattern"] or "")[:30]
+            self.session_list.addItem(f"#{s['id']} {label} ({s['hit_count']})")
             self.session_list.item(self.session_list.count() - 1).setData(
                 Qt.ItemDataRole.UserRole, s["id"]
             )
@@ -370,10 +574,36 @@ class MainWindow(QMainWindow):
         if not item:
             return
         sid = item.data(Qt.ItemDataRole.UserRole)
-        self.hits = self.cache.load_hits(sid)
+        hits = self.cache.load_hits(sid)
+        batch = self.cache.load_batch(sid)
+        self.hits = hits
         self.current_search_id = sid
-        self._hit_by_id = {h.hit_id: h for h in self.hits}
+        self._hit_by_id = {h.hit_id: h for h in hits}
+        if batch is not None and batch.entries:
+            self._show_saved_batch(batch)
+        else:
+            self._drop_batch_filter()
+            self.search_panel.hide_batch()
         self._refresh_presentation()
+
+    def _show_saved_batch(self, batch: BatchSession) -> None:
+        results, entry_of = apply_batch_session(batch, self.hits)
+        self._batch_results = results
+        self._hit_entry = entry_of
+        self._batch_lines = [(entry.line_no, entry.pattern) for entry in batch.entries]
+        self._batch_path = Path(batch.path) if batch.path else None
+        title, rows = self._batch_view()
+        if self._batch_path:
+            label, tip = self._batch_path.name, str(self._batch_path)
+        else:
+            label, tip = "批处理", ""
+        self.search_panel.set_batch(
+            title=title,
+            file_label=label,
+            file_tip=tip,
+            rows=rows,
+            checked=[entry.checked for entry in batch.entries],
+        )
 
     def _on_page_offset_changed(self, *_args) -> None:
         offset = self.search_panel.page_offset_value()
@@ -449,7 +679,13 @@ class MainWindow(QMainWindow):
             return
         offset = self.search_panel.page_offset_value()
         disp = to_display_page(hit.page, offset)
+        batch_line = ""
+        entry_index = self._hit_entry.get(hit.hit_id)
+        if entry_index is not None and 0 <= entry_index < len(self._batch_results):
+            entry = self._batch_results[entry_index]
+            batch_line = f"条目 第 {entry.line_no} 行: {entry.pattern}\n"
         self.detail.setPlainText(
+            f"{batch_line}"
             f"命中 #{hit.hit_id}  图书页 {disp}（PDF 第 {hit.page + 1} 页）\n"
             f"原文: {hit.text!r}\n"
             f"规范化: {hit.normalized_text!r}\n"
