@@ -125,6 +125,19 @@ def test_pinyin_set_covers_product_chars():
         assert cre.fullmatch(ch) is not None, repr(ch)
 
 
+def test_pinyin_includes_script_g_and_alpha():
+    assert "\u0261" in PINYIN_CHARS  # ɡ
+    assert "\u0251" in PINYIN_CHARS  # ɑ
+    cre = re.compile(expand_locale_escapes(r"\y"))
+    assert cre.fullmatch("\u0261")
+    assert cre.fullmatch("\u0251")
+    seq = re.compile(expand_locale_escapes(r"\y+"))
+    assert seq.fullmatch("b\u0251n\u0261")  # bɑnɡ
+    comp = re.compile(expand_locale_escapes(r"\Y"))
+    assert comp.fullmatch("\u0261") is None
+    assert comp.fullmatch("\u0251") is None
+
+
 def _index_from_text(text: str) -> DocumentIndex:
     chars = [
         CharInfo(

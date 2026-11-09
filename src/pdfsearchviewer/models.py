@@ -127,7 +127,8 @@ class Hit:
     font: str
     size: float
     color: int
-    reviewed: Optional[bool] = None  # True=ok, False=bad, None=unset
+    # None = 未标记；"" = 已标记但未填信息；其他 = 标记信息
+    mark: Optional[str] = None
 
     @property
     def font_display(self) -> str:

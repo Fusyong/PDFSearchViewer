@@ -1,20 +1,49 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+import html
+
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QHeaderView,
-    QAbstractItemView,
 )
 
 from ..models import Hit
 from ..stats import group_hits, summary_counts
+
+# 分组列最多大约 8 个汉字；更长的标签省略，悬停查看全文。
+_GROUP_LABEL_CHARS = 8
+
+
+def _hover_tip(label: str, count: int) -> str:
+    """Full group label and count. Rich text so long labels wrap."""
+    safe = html.escape(label).replace("\n", "<br>")
+    return (
+        '<table><tr><td width="360">'
+        f"{safe}<br>数量：{count}"
+        "</td></tr></table>"
+    )
+
+
+class _RowNumberHeader(QHeaderView):
+    """Row-number column. Width follows the largest row label."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Vertical, parent)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        rows = max(self.count(), 1)
+        text = self.fontMetrics().horizontalAdvance(str(rows))
+        return QSize(max(hint.width(), text + 16), hint.height())
 
 
 class StatsPanel(QWidget):
@@ -24,12 +53,14 @@ class StatsPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         self.summary = QLabel("命中: 0")
+        self.summary.setWordWrap(True)
         self.group_by = QComboBox()
         self.group_by.addItem("按原文形态", "text")
         self.group_by.addItem("按规范化形态", "normalized")
         self.group_by.addItem("按字体", "font")
         self.group_by.addItem("按字号", "size")
         self.group_by.addItem("按字色", "color")
+        self.group_by.addItem("按信息", "mark")
         self.group_by.currentIndexChanged.connect(self._refresh_table)
 
         top = QHBoxLayout()
@@ -38,22 +69,33 @@ class StatsPanel(QWidget):
         top.addStretch(1)
 
         self.table = QTableWidget(0, 2)
+        self.table.setVerticalHeader(_RowNumberHeader(self.table))
         self.table.setHorizontalHeaderLabels(["分组", "数量"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.table.itemSelectionChanged.connect(self._on_select)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
 
         self.clear_filter_btn_hint = QLabel("点击行筛选小窗；再点空白取消")
         self.clear_filter_btn_hint.setStyleSheet("color: #666; font-size: 11px;")
+        self.clear_filter_btn_hint.setWordWrap(True)
 
         layout.addWidget(self.summary)
         layout.addLayout(top)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, stretch=1)
         layout.addWidget(self.clear_filter_btn_hint)
 
         self._hits: list[Hit] = []
         self._groups = []
+        self._fitting = False
+        self._apply_column_widths()
 
     def set_hits(self, hits: list[Hit]) -> None:
         self._hits = hits
@@ -62,7 +104,7 @@ class StatsPanel(QWidget):
             f"命中 {sc['total']}｜原文形态 {sc['unique_text']}｜"
             f"规范化 {sc['unique_normalized']}｜字体 {sc['unique_font']}｜"
             f"字号 {sc['unique_size']}｜字色 {sc['unique_color']}\n"
-            f"复核 ✓{sc['reviewed_ok']} ✗{sc['reviewed_bad']} 未审 {sc['unreviewed']}"
+            f"标记 {sc['marked']} 未标记 {sc['unmarked']}"
         )
         self._refresh_table()
 
@@ -71,8 +113,52 @@ class StatsPanel(QWidget):
         self._groups = group_hits(self._hits, by) if self._hits else []
         self.table.setRowCount(len(self._groups))
         for i, g in enumerate(self._groups):
-            self.table.setItem(i, 0, QTableWidgetItem(g.label))
-            self.table.setItem(i, 1, QTableWidgetItem(str(g.count)))
+            tip = _hover_tip(g.label, g.count)
+            label_item = QTableWidgetItem(g.label)
+            label_item.setToolTip(tip)
+            count_item = QTableWidgetItem(str(g.count))
+            count_item.setToolTip(tip)
+            count_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            self.table.setItem(i, 0, label_item)
+            self.table.setItem(i, 1, count_item)
+        self._apply_column_widths()
+
+    def _column_bounds(self) -> tuple[int, int, int, int]:
+        fm = self.table.fontMetrics()
+        slack = 20
+        group_min = fm.horizontalAdvance("分组") + slack
+        group_max = fm.horizontalAdvance("中" * _GROUP_LABEL_CHARS) + slack
+        count_min = fm.horizontalAdvance("数量") + slack
+        count_max = max(count_min, fm.horizontalAdvance("000000") + slack)
+        return group_min, group_max, count_min, count_max
+
+    def _content_width(self, column: int) -> int:
+        header = self.table.horizontalHeader()
+        return max(self.table.sizeHintForColumn(column), header.sectionSizeHint(column))
+
+    def _row_header_width(self) -> int:
+        """Width of the row-number column, sized to the largest row label."""
+        return self.table.verticalHeader().sizeHint().width()
+
+    def _apply_column_widths(self) -> None:
+        """Fit both columns to their text, and never wider than the cap."""
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            group_min, group_max, count_min, count_max = self._column_bounds()
+            group_w = min(max(self._content_width(0), group_min), group_max)
+            count_w = min(max(self._content_width(1), count_min), count_max)
+            self.table.setColumnWidth(0, group_w)
+            self.table.setColumnWidth(1, count_w)
+            row_w = self._row_header_width()
+            chrome = self.table.frameWidth() * 2
+            chrome += self.table.verticalScrollBar().sizeHint().width()
+            self.table.setFixedWidth(group_w + count_w + row_w + chrome)
+        finally:
+            self._fitting = False
 
     def _on_select(self) -> None:
         rows = self.table.selectionModel().selectedRows()

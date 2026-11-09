@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from .models import Hit
 from .normalize import color_to_hex
 
+EMPTY_MARK_LABEL = "标记（空）"
+UNMARKED_LABEL = "未标记"
+
 
 @dataclass
 class StatGroup:
@@ -14,9 +17,17 @@ class StatGroup:
     hit_ids: list[int]
 
 
+def mark_label(mark: str | None) -> str:
+    """Group label for one hit's mark. Blank notes share one group."""
+    if mark is None:
+        return UNMARKED_LABEL
+    text = mark.strip()
+    return text or EMPTY_MARK_LABEL
+
+
 def group_hits(hits: list[Hit], by: str) -> list[StatGroup]:
     """
-    by: text | normalized | font | size | color
+    by: text | normalized | font | size | color | mark
     """
     buckets: dict[str, list[int]] = {}
     labels: dict[str, str] = {}
@@ -37,6 +48,13 @@ def group_hits(hits: list[Hit], by: str) -> list[StatGroup]:
         elif by == "color":
             key = color_to_hex(h.color)
             label = key
+        elif by == "mark":
+            label = mark_label(h.mark)
+            if h.mark is None:
+                key = "\x00"
+            else:
+                text = h.mark.strip()
+                key = "\x01" if not text else "\x02" + text
         else:
             raise ValueError(f"unknown group by: {by}")
         buckets.setdefault(key, []).append(h.hit_id)
@@ -58,7 +76,6 @@ def summary_counts(hits: list[Hit]) -> dict[str, int]:
         "unique_font": len({h.font_display for h in hits}),
         "unique_size": len({round(h.size, 2) for h in hits}),
         "unique_color": len({h.color for h in hits}),
-        "reviewed_ok": sum(1 for h in hits if h.reviewed is True),
-        "reviewed_bad": sum(1 for h in hits if h.reviewed is False),
-        "unreviewed": sum(1 for h in hits if h.reviewed is None),
+        "marked": sum(1 for h in hits if h.mark is not None),
+        "unmarked": sum(1 for h in hits if h.mark is None),
     }

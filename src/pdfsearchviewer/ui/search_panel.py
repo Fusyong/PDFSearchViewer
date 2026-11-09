@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
@@ -22,6 +25,37 @@ from PySide6.QtWidgets import (
 from ..models import BBox, NormalizeOptions, SearchQuery, StyleFilter, StyleMatchMode
 from ..normalize import color_to_hex, parse_hex_color
 from ..page_numbers import to_display_page, to_pdf_page
+from ..recent_searches import RecentSearches, default_recent_path
+
+# 可编辑下拉框的回车会把 returnPressed 连发两次，同一式子在短时间内只提交一次。
+_SUBMIT_GAP_S = 0.3
+
+
+class PatternBox(QComboBox):
+    """可编辑搜索框。下拉列出最近式子，输入时不自动补全。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setCompleter(None)
+        self.setMaxVisibleItems(12)
+        self.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.setMinimumContentsLength(16)
+        edit = self.lineEdit()
+        if edit is not None:
+            edit.setPlaceholderText("正则或普通文本…（\\y \\c \\p \\j 等见帮助）")
+            edit.setClearButtonEnabled(True)
+        self.view().setTextElideMode(Qt.TextElideMode.ElideMiddle)
+
+    def showPopup(self) -> None:
+        view = self.view()
+        column = view.sizeHintForColumn(0)
+        if column > 0:
+            view.setMinimumWidth(max(self.width(), min(column + 36, 640)))
+        super().showPopup()
 
 
 class SearchPanel(QWidget):
@@ -32,12 +66,19 @@ class SearchPanel(QWidget):
     batch_filter_changed = Signal()
     batch_closed = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, recent_path: str | Path | None = None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
 
-        self.pattern = QLineEdit()
-        self.pattern.setPlaceholderText("正则或普通文本…（\\y \\c \\p \\j 等见帮助）")
+        self.pattern = PatternBox()
+        self.pattern.setToolTip(
+            "点右侧箭头，可选用最近搜索过的式子。选中后按回车或点「搜索」执行。"
+        )
+        path = Path(recent_path) if recent_path is not None else default_recent_path()
+        self._recent = RecentSearches(path)
+        self._last_submit: str | None = None
+        self._last_submit_at = 0.0
+        self._show_history(self._recent.patterns, text="")
         self.is_regex = QCheckBox("正则表达式")
         self.is_regex.setChecked(True)
         self.is_regex.setToolTip(
@@ -152,7 +193,9 @@ class SearchPanel(QWidget):
 
         self.search_btn = QPushButton("搜索")
         self.search_btn.clicked.connect(self._emit_search)
-        self.pattern.returnPressed.connect(self._emit_search)
+        edit = self.pattern.lineEdit()
+        if edit is not None:
+            edit.returnPressed.connect(self._emit_search)
         self.batch_btn = QPushButton("批处理…")
         self.batch_btn.setToolTip(
             "选择文本文件，用当前搜索选项逐行搜索，合并为一次搜索结果。"
@@ -331,7 +374,7 @@ class SearchPanel(QWidget):
     def build_search_query(self) -> SearchQuery:
         """Text search only — style / region / page are not included."""
         return SearchQuery(
-            pattern=self.pattern.text(),
+            pattern=self.pattern.currentText(),
             is_regex=self.is_regex.isChecked(),
             case_insensitive=self.case_insensitive.isChecked(),
             dotall=self.dotall.isChecked(),
@@ -390,7 +433,31 @@ class SearchPanel(QWidget):
         q.page_to = page_to
         return q
 
+    def _show_history(self, patterns: list[str], *, text: str) -> None:
+        box = self.pattern
+        box.blockSignals(True)
+        box.clear()
+        if patterns:
+            box.addItems(patterns)
+        box.setCurrentIndex(-1)
+        box.setEditText(text)
+        box.blockSignals(False)
+
     def _emit_search(self) -> None:
+        text = self.pattern.currentText()
+        now = time.monotonic()
+        if (
+            self._last_submit is not None
+            and text == self._last_submit
+            and now - self._last_submit_at < _SUBMIT_GAP_S
+        ):
+            return
+        self._last_submit = text
+        self._last_submit_at = now
+        if text != "":
+            updated = self._recent.remember(text)
+            if updated is not None:
+                self._show_history(updated, text=text)
         self.search_requested.emit(self.build_search_query())
 
     def checked_batch_indices(self) -> set[int]:

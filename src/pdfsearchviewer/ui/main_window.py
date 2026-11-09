@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QTabWidget,
-    QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -57,6 +56,7 @@ from ..normalize import color_to_hex
 from ..page_numbers import to_display_page
 from ..renderer import PdfRenderSession
 from ..search_engine import filter_hits, search
+from .hit_detail_bar import HitDetailBar
 from .hit_grid import HitGrid
 from .page_view import PageView
 from .search_panel import SearchPanel
@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
         self.hit_grid = HitGrid()
         self.hit_grid.hit_selected.connect(self._on_hit_selected)
         self.hit_grid.hit_activated.connect(self._on_hit_activated)
-        self.hit_grid.review_changed.connect(self._on_review)
+        self.hit_grid.mark_changed.connect(self._on_mark)
         self.hit_grid.viewport_needs_render.connect(self._queue_render)
 
         self.page_view = PageView()
@@ -205,13 +205,10 @@ class MainWindow(QMainWindow):
         self.center_tabs.addTab(self.hits_tab, "命中聚合")
         self.center_tabs.addTab(self.page_view, "页面浏览")
 
-        self.detail = QTextEdit()
-        self.detail.setReadOnly(True)
-        self.detail.setMaximumHeight(140)
+        self.detail_bar = HitDetailBar()
 
         center_l.addWidget(self.center_tabs, stretch=1)
-        center_l.addWidget(QLabel("命中详情"))
-        center_l.addWidget(self.detail)
+        center_l.addWidget(self.detail_bar)
         self._on_view_mode_changed()
         self._on_layout_changed()
 
@@ -225,7 +222,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([320, 800, 280])
+        splitter.setSizes([320, 800, 200])
 
         root.addWidget(splitter)
         self.setStatusBar(QStatusBar())
@@ -318,6 +315,7 @@ class MainWindow(QMainWindow):
             self.hit_grid.set_page_offset(offset)
             self.hit_grid.set_hits([])
             self.stats_panel.set_hits([])
+            self.detail_bar.clear()
             self.page_view.set_session(self.render_session, self.index)
             self.page_view.set_page_offset(offset)
             self.page_view.set_hits([])
@@ -349,6 +347,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def _install_hits(self, hits: list[Hit], *, status: str | None = None) -> None:
+        self.detail_bar.clear()
         self.hits = hits
         self._hit_by_id = {h.hit_id: h for h in self.hits}
         offset = self.search_panel.page_offset_value()
@@ -576,6 +575,7 @@ class MainWindow(QMainWindow):
         sid = item.data(Qt.ItemDataRole.UserRole)
         hits = self.cache.load_hits(sid)
         batch = self.cache.load_batch(sid)
+        self.detail_bar.clear()
         self.hits = hits
         self.current_search_id = sid
         self._hit_by_id = {h.hit_id: h for h in hits}
@@ -609,6 +609,7 @@ class MainWindow(QMainWindow):
         offset = self.search_panel.page_offset_value()
         self.hit_grid.set_page_offset(offset)
         self.page_view.set_page_offset(offset)
+        self.detail_bar.set_page_offset(offset)
 
     def _on_view_mode_changed(self, *_args) -> None:
         if self._syncing_align:
@@ -678,22 +679,18 @@ class MainWindow(QMainWindow):
         if not hit:
             return
         offset = self.search_panel.page_offset_value()
-        disp = to_display_page(hit.page, offset)
-        batch_line = ""
+        entry_line = None
+        entry_pattern = None
         entry_index = self._hit_entry.get(hit.hit_id)
         if entry_index is not None and 0 <= entry_index < len(self._batch_results):
             entry = self._batch_results[entry_index]
-            batch_line = f"条目 第 {entry.line_no} 行: {entry.pattern}\n"
-        self.detail.setPlainText(
-            f"{batch_line}"
-            f"命中 #{hit.hit_id}  图书页 {disp}（PDF 第 {hit.page + 1} 页）\n"
-            f"原文: {hit.text!r}\n"
-            f"规范化: {hit.normalized_text!r}\n"
-            f"字体: {hit.font_display} ({hit.font})\n"
-            f"字号: {hit.size:.2f} pt\n"
-            f"字色: {color_to_hex(hit.color)}\n"
-            f"bbox: {hit.bbox}\n"
-            f"字符范围: [{hit.char_start}, {hit.char_end})"
+            entry_line = entry.line_no
+            entry_pattern = entry.pattern
+        self.detail_bar.show_hit(
+            hit,
+            page_offset=offset,
+            entry_line=entry_line,
+            entry_pattern=entry_pattern,
         )
         self.page_view.goto_hit(hit)
 
@@ -719,13 +716,15 @@ class MainWindow(QMainWindow):
             self.run_search(self.search_panel.build_search_query())
         self.statusBar().showMessage(f"已应用坐标过滤 {region}")
 
-    def _on_review(self, hit_id: int, reviewed) -> None:
+    def _on_mark(self, hit_id: int, mark: str | None) -> None:
         hit = self._hit_by_id.get(hit_id)
         if hit:
-            hit.reviewed = reviewed
+            hit.mark = mark
+        self.hit_grid.update_hit_mark(hit_id, mark)
         if self.current_search_id is not None:
-            self.cache.update_hit_review(self.current_search_id, hit_id, reviewed)
+            self.cache.update_hit_mark(self.current_search_id, hit_id, mark)
         self.stats_panel.set_hits(self._presentation_hits())
+        self.detail_bar.refresh()
 
     def _on_stat_filter(self, ids) -> None:
         self.hit_grid.set_filter(ids)
@@ -755,7 +754,7 @@ class MainWindow(QMainWindow):
                     "y0",
                     "x1",
                     "y1",
-                    "reviewed",
+                    "mark",
                 ]
             )
             for h in self.hits:
@@ -771,7 +770,7 @@ class MainWindow(QMainWindow):
                         h.size,
                         color_to_hex(h.color),
                         *h.bbox,
-                        "" if h.reviewed is None else ("ok" if h.reviewed else "bad"),
+                        "" if h.mark is None else (h.mark.strip() or "标记（空）"),
                     ]
                 )
         self.statusBar().showMessage(f"已导出 {path}")
@@ -797,7 +796,7 @@ class MainWindow(QMainWindow):
                     "size": h.size,
                     "color": color_to_hex(h.color),
                     "bbox": list(h.bbox),
-                    "reviewed": h.reviewed,
+                    "mark": None if h.mark is None else h.mark.strip(),
                 }
                 for h in self.hits
             ],

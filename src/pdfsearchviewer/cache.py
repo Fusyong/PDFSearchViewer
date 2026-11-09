@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS hits (
     size REAL NOT NULL,
     color INTEGER NOT NULL,
     reviewed INTEGER,
+    mark_note TEXT,
     FOREIGN KEY (search_id) REFERENCES searches(id) ON DELETE CASCADE
 );
 
@@ -81,6 +82,21 @@ class IndexCache:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(searches)")}
         if cols and "batch_json" not in cols:
             self._conn.execute("ALTER TABLE searches ADD COLUMN batch_json TEXT")
+        hit_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(hits)")}
+        if hit_cols and "mark_note" not in hit_cols:
+            self._conn.execute("ALTER TABLE hits ADD COLUMN mark_note TEXT")
+            # 旧的「正确 / 有误」保留为标记信息，避免已复核的命中变成未标记。
+            self._conn.execute(
+                """
+                UPDATE hits
+                SET mark_note = CASE reviewed
+                    WHEN 1 THEN '正确'
+                    WHEN 0 THEN '有误'
+                    ELSE ''
+                END
+                WHERE reviewed IS NOT NULL
+                """
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -138,8 +154,8 @@ class IndexCache:
                 """
                 INSERT INTO hits (
                     search_id, hit_id, page, text, normalized_text, bbox_json,
-                    char_start, char_end, font, size, color, reviewed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    char_start, char_end, font, size, color, reviewed, mark_note
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     search_id,
@@ -153,7 +169,8 @@ class IndexCache:
                     h.font,
                     h.size,
                     h.color,
-                    None if h.reviewed is None else (1 if h.reviewed else 0),
+                    None if h.mark is None else 1,
+                    h.mark,
                 ),
             )
         self._conn.commit()
@@ -177,7 +194,6 @@ class IndexCache:
         ).fetchall()
         hits: list[Hit] = []
         for r in rows:
-            reviewed = r["reviewed"]
             hits.append(
                 Hit(
                     hit_id=r["hit_id"],
@@ -190,7 +206,7 @@ class IndexCache:
                     font=r["font"],
                     size=r["size"],
                     color=r["color"],
-                    reviewed=None if reviewed is None else bool(reviewed),
+                    mark=r["mark_note"],
                 )
             )
         return hits
@@ -207,11 +223,13 @@ class IndexCache:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
-    def update_hit_review(self, search_id: int, hit_id: int, reviewed: bool | None) -> None:
-        val = None if reviewed is None else (1 if reviewed else 0)
+    def update_hit_mark(self, search_id: int, hit_id: int, mark: str | None) -> None:
         self._conn.execute(
-            "UPDATE hits SET reviewed = ? WHERE search_id = ? AND hit_id = ?",
-            (val, search_id, hit_id),
+            """
+            UPDATE hits SET mark_note = ?, reviewed = ?
+            WHERE search_id = ? AND hit_id = ?
+            """,
+            (mark, None if mark is None else 1, search_id, hit_id),
         )
         self._conn.commit()
 

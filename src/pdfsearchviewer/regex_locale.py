@@ -15,10 +15,12 @@ complement escapes are not valid inside ``[]``.
 from __future__ import annotations
 
 # Product-specified pinyin letter set (Latin + tone-marked vowels / nasals).
+# Trailing two: ɡ U+0261 SCRIPT G, ɑ U+0251 LATIN ALPHA (printed Hanyu Pinyin).
 PINYIN_CHARS = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     "āáǎàōóǒòêê̄ếê̌ềēéěèīíǐìūúǔùüǖǘǚǜm̄ḿm̀ńňǹẑĉŝŋ"
     "ĀÁǍÀŌÓǑÒÊÊ̄ẾÊ̌ỀĒÉĚÈĪÍǏÌŪÚǓÙÜǕǗǙǛM̄ḾM̀ŃŇǸẐĈŜŊ"
+    "\u0261\u0251"
 )
 
 # CJK Unified Ideographs + Ext. A + Compatibility Ideographs (+ 〇)

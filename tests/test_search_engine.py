@@ -149,9 +149,13 @@ def test_cache_roundtrip(doc_index, tmp_path):
     sid = cache.save_search(doc_index.fingerprint, q, hits, name="t")
     loaded_hits = cache.load_hits(sid)
     assert len(loaded_hits) == len(hits)
-    cache.update_hit_review(sid, hits[0].hit_id, True)
+    cache.update_hit_mark(sid, hits[0].hit_id, "")
     loaded_hits2 = cache.load_hits(sid)
-    assert loaded_hits2[0].reviewed is True
+    assert loaded_hits2[0].mark == ""
+    cache.update_hit_mark(sid, hits[0].hit_id, "勘误")
+    assert cache.load_hits(sid)[0].mark == "勘误"
+    cache.update_hit_mark(sid, hits[0].hit_id, None)
+    assert cache.load_hits(sid)[0].mark is None
     cache.close()
 
 
