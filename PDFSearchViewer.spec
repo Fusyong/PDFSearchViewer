@@ -1,9 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for PDFSearchViewer (Windows GUI exe)."""
+"""PyInstaller spec for PDFSearchViewer.
 
+Default is a folder build (onedir): files are copied, not packed into one exe.
+Set PDFSV_ONEFILE=1 to build the slower single-file exe instead.
+"""
+
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
+
+ONEFILE = os.environ.get("PDFSV_ONEFILE", "0").strip() == "1"
 
 ROOT = Path(SPECPATH).resolve()
 SRC = ROOT / "src"
@@ -44,12 +51,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+_exe_common = dict(
     name="PDFSearchViewer",
     debug=False,
     bootloader_ignore_signals=False,
@@ -64,3 +66,30 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+if ONEFILE:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        **_exe_common,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        **_exe_common,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="PDFSearchViewer",
+    )

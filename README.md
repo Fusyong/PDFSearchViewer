@@ -54,30 +54,37 @@ pdfsearchviewer
 pytest
 ```
 
-## 打包为 exe
+## 打包
 
-在项目根目录执行（会使用 `.venv`，自动安装 PyInstaller）：
+默认打成文件夹，不把依赖压进单个 exe。这样打包更快，启动时也不用先解压到临时目录。在项目根目录执行：
 
 ```powershell
 .\build_exe.ps1
 ```
 
-或双击 / 命令行运行 `build_exe.bat`。
+或双击 / 命令行运行 `build_exe.bat`。脚本使用 `.venv`；依赖和 PyInstaller 已经装好时会直接打包，并复用上次的分析缓存。
 
-成功后得到单文件：
+成功后运行：
 
 ```text
-dist\PDFSearchViewer.exe
+dist\PDFSearchViewer\PDFSearchViewer.exe
 ```
 
-可选参数：
+把整个 `dist\PDFSearchViewer` 文件夹拷走即可，目标机器无需安装 Python。只拷贝里面的 exe 无法运行。
+
+依赖有变化，或打包结果异常时，再全量重来：
 
 ```powershell
-.\build_exe.ps1 -Clean          # 先清空 build/、dist/
-.\build_exe.ps1 -Onedir         # 打成文件夹（启动更快，便于排查依赖）
+.\build_exe.ps1 -Clean
 ```
 
-说明：需在 Windows 本机打包；产物体积主要来自 PyMuPDF 与 PySide6。目标机器无需安装 Python。
+仍需要单个独立 exe 时（便于拷贝，但打包更慢，每次启动都要解压）：
+
+```powershell
+.\build_exe.ps1 -Onefile
+```
+
+产物为 `dist\PDFSearchViewer.exe`。体积主要来自 PyMuPDF 与 PySide6。需在 Windows 本机打包。
 
 ## 项目结构
 
