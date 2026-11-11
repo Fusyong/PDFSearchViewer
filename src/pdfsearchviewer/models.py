@@ -151,10 +151,10 @@ class DocumentIndex:
 class ViewMode(str, Enum):
     """Hit-tile viewport preset."""
 
-    BOOK = "book"  # facing pages: even left, odd right; default
+    BOOK = "book"  # facing pages: even left, odd right
     FIT_WIDTH = "fit_width"  # full page width (horizontal books)
     FIT_HEIGHT = "fit_height"  # full page height (vertical books)
-    LOCAL = "local"  # fixed window centered on hit (legacy)
+    LOCAL = "local"  # fixed window centered on hit; default
 
 
 class AlignMode(str, Enum):
@@ -187,6 +187,6 @@ class CameraSettings:
     tile_w: int = 220
     tile_h: int = 120
     columns: int = 4  # lane count: columns when ROW, rows when COLUMN (ignored in BOOK)
-    view_mode: ViewMode = ViewMode.BOOK
-    align: AlignMode = AlignMode.LEFT
+    view_mode: ViewMode = ViewMode.LOCAL
+    align: AlignMode = AlignMode.CENTER
     layout: LayoutMode = LayoutMode.ROW

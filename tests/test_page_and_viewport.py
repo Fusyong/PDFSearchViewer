@@ -105,5 +105,7 @@ def test_clip_rect_book_like_fit_width():
     assert abs(clip.width - page.width) < 1e-6
 
 
-def test_camera_default_is_book():
-    assert CameraSettings().view_mode == ViewMode.BOOK
+def test_camera_default_is_local_center():
+    cam = CameraSettings()
+    assert cam.view_mode == ViewMode.LOCAL
+    assert cam.align == AlignMode.CENTER

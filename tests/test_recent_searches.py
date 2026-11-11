@@ -108,6 +108,21 @@ def test_search_box_remembers_and_dropdown_fills(qapp, tmp_path):
     assert load_recent(path)[0] == "beta"
 
 
+def test_search_options_default_on(qapp, tmp_path):
+    panel = SearchPanel(recent_path=tmp_path / "recent_searches.json")
+    assert panel.is_regex.isChecked()
+    assert panel.case_insensitive.isChecked()
+    assert panel.dotall.isChecked()
+    assert panel.strip_ws.isChecked()
+    assert not panel.whole_word.isChecked()
+    query = panel.build_search_query()
+    assert query.is_regex
+    assert query.case_insensitive
+    assert query.dotall
+    assert query.normalize.strip_whitespace
+    assert query.normalize.collapse_single_newlines
+
+
 def test_blank_search_is_not_stored(qapp, tmp_path):
     path = tmp_path / "recent_searches.json"
     panel = SearchPanel(recent_path=path)

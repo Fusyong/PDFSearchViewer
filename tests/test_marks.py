@@ -72,6 +72,7 @@ def test_tile_shows_only_the_page_and_one_mark_box(qapp: QApplication):
     tile.show()
     qapp.processEvents()
     assert tile.meta.text() == f"p{to_display_page(4, 2)}"
+    assert tile.meta.parentWidget() is tile.mark_cb.parentWidget()
     boxes = tile.findChildren(QCheckBox)
     assert [box.text() for box in boxes] == ["标记"]
     assert boxes[0].isChecked() is False

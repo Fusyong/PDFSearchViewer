@@ -125,10 +125,16 @@ class MainWindow(QMainWindow):
         self.view_mode_combo.addItem("全宽", ViewMode.FIT_WIDTH.value)
         self.view_mode_combo.addItem("全高", ViewMode.FIT_HEIGHT.value)
         self.view_mode_combo.addItem("局部", ViewMode.LOCAL.value)
+        view_idx = self.view_mode_combo.findData(self.camera.view_mode.value)
+        if view_idx >= 0:
+            self.view_mode_combo.setCurrentIndex(view_idx)
         self.align_combo = QComboBox()
         self.align_combo.addItem("左对齐", AlignMode.LEFT.value)
         self.align_combo.addItem("上对齐", AlignMode.TOP.value)
         self.align_combo.addItem("居中", AlignMode.CENTER.value)
+        align_idx = self.align_combo.findData(self.camera.align.value)
+        if align_idx >= 0:
+            self.align_combo.setCurrentIndex(align_idx)
         self.layout_combo = QComboBox()
         self.layout_combo.addItem("横排", LayoutMode.ROW.value)
         self.layout_combo.addItem("竖排", LayoutMode.COLUMN.value)

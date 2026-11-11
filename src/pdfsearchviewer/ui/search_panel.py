@@ -87,16 +87,18 @@ class SearchPanel(QWidget):
             "详见菜单「帮助 → 本地字符集转义…」。"
         )
         self.case_insensitive = QCheckBox("忽略大小写")
+        self.case_insensitive.setChecked(True)
         self.whole_word = QCheckBox("整词匹配")
         self.whole_word.setToolTip(
             "匹配两侧不能是英文字母、数字或下划线（便于整词搜英文/编号；连续汉字中仍可命中）。"
         )
         self.dotall = QCheckBox("忽略单个换行")
+        self.dotall.setChecked(True)
         self.dotall.setToolTip(
             "匹配时去掉单个换行，便于搜跨行词语；连续两个及以上换行（空行）仍保留为分隔，可用 $ 锚定。"
         )
         self.strip_ws = QCheckBox("忽略空白")
-        self.strip_ws.setChecked(False)
+        self.strip_ws.setChecked(True)
         self.strip_ws.setToolTip(
             "忽略搜索字符串和页面文本两侧的空白字符后再匹配。"
         )

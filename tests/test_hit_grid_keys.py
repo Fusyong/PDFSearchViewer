@@ -139,6 +139,7 @@ def test_column_layout_down_stays_in_the_lane(qapp: QApplication):
 
 def test_book_arrows_skip_empty_pages(qapp: QApplication):
     grid = HitGrid()
+    grid.set_camera(CameraSettings(view_mode=ViewMode.BOOK, tile_w=80, tile_h=40))
     # display pages with offset 0: pdf 0 → 1 (right), pdf 1 → 2 (left), pdf 2 → 3 (right)
     grid.set_hits(
         [

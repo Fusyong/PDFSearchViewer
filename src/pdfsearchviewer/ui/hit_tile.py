@@ -118,11 +118,12 @@ class HitTile(QFrame):
         row = QWidget()
         hl = QHBoxLayout(row)
         hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        hl.addWidget(self.meta)
         hl.addWidget(self.mark_cb)
         hl.addStretch(1)
 
-        layout.addWidget(self.image_label)
-        layout.addWidget(self.meta)
+        layout.addWidget(self.image_label, stretch=1)
         layout.addWidget(row)
         self.update_hit(hit, page_offset)
 
